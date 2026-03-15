@@ -6,26 +6,38 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.PieChart
+import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -39,8 +51,16 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -54,6 +74,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.toObject
 import java.util.Calendar
+import kotlin.math.min
 
 class MainActivity : ComponentActivity() {
 
@@ -300,6 +321,30 @@ fun ExpensesScreen(
         }
     }
 
+    val monthlyTotals = expenses
+        .groupBy { monthKeyFromDate(it.expense.date) }
+        .filterKeys { it.isNotBlank() }
+        .mapValues { entry -> entry.value.sumOf { it.expense.net } }
+        .toSortedMap()
+
+    val monthlyTrendData = monthlyTotals.entries.map { it.key to it.value }
+
+    val categoryTotals = expenses
+        .groupBy { it.expense.category.ifBlank { "Uncategorised" } }
+        .mapValues { entry -> entry.value.sumOf { it.expense.net } }
+        .toList()
+        .sortedByDescending { it.second }
+
+    val topFiveCategories = categoryTotals.take(5)
+    val otherCategoriesTotal = categoryTotals.drop(5).sumOf { it.second }
+
+    val donutCategoryData = buildList {
+        addAll(topFiveCategories)
+        if (otherCategoriesTotal > 0) {
+            add("Other" to otherCategoriesTotal)
+        }
+    }
+
     DisposableEffect(Unit) {
         val uid = auth.currentUser?.uid
         if (uid == null) {
@@ -469,7 +514,9 @@ fun ExpensesScreen(
                             topSupplierName = topSupplierEntry?.key ?: "—",
                             topSupplierAmount = topSupplierEntry?.value ?: 0.0,
                             topCategoryName = topCategoryEntry?.key ?: "—",
-                            topCategoryAmount = topCategoryEntry?.value ?: 0.0
+                            topCategoryAmount = topCategoryEntry?.value ?: 0.0,
+                            monthlyTrendData = monthlyTrendData,
+                            donutCategoryData = donutCategoryData
                         )
                     }
 
@@ -1286,6 +1333,49 @@ fun DuplicateExpenseScreen(
 }
 
 @Composable
+fun DashboardStatCard(
+    modifier: Modifier = Modifier,
+    title: String,
+    value: String,
+    subtitle: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector
+) {
+    Card(
+        modifier = modifier,
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+
+                Text(
+                    text = "  ${title.uppercase()}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Text(
+                text = value,
+                style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.padding(top = 10.dp)
+            )
+
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
 fun DashboardScreen(
     thisMonthTotal: Double,
     thisMonthCount: Int,
@@ -1294,115 +1384,448 @@ fun DashboardScreen(
     topSupplierName: String,
     topSupplierAmount: Double,
     topCategoryName: String,
-    topCategoryAmount: Double
+    topCategoryAmount: Double,
+    monthlyTrendData: List<Pair<String, Double>>,
+    donutCategoryData: List<Pair<String, Double>>
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 16.dp),
+            .verticalScroll(rememberScrollState())
+            .padding(top = 16.dp, bottom = 80.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Card(modifier = Modifier.weight(1f)) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "This month",
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "£${"%.2f".format(thisMonthTotal)}",
-                        style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.padding(top = 6.dp)
-                    )
-                }
-            }
+            DashboardStatCard(
+                modifier = Modifier.weight(1f),
+                title = "This month",
+                value = formatGBP(thisMonthTotal),
+                subtitle = "$thisMonthCount expense${if (thisMonthCount == 1) "" else "s"}",
+                icon = Icons.Default.TrendingUp
+            )
 
-            Card(modifier = Modifier.weight(1f)) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "This month count",
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = thisMonthCount.toString(),
-                        style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.padding(top = 6.dp)
-                    )
-                }
-            }
+            DashboardStatCard(
+                modifier = Modifier.weight(1f),
+                title = "This month count",
+                value = thisMonthCount.toString(),
+                subtitle = "Entries recorded",
+                icon = Icons.Default.Description
+            )
         }
 
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Card(modifier = Modifier.weight(1f)) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Last month",
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "£${"%.2f".format(lastMonthTotal)}",
-                        style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.padding(top = 6.dp)
-                    )
-                }
-            }
+            DashboardStatCard(
+                modifier = Modifier.weight(1f),
+                title = "Last month",
+                value = formatGBP(lastMonthTotal),
+                subtitle = "Previous month total",
+                icon = Icons.Default.CalendarMonth
+            )
 
-            Card(modifier = Modifier.weight(1f)) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Year to date",
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "£${"%.2f".format(yearToDateTotal)}",
-                        style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.padding(top = 6.dp)
-                    )
-                }
-            }
+            DashboardStatCard(
+                modifier = Modifier.weight(1f),
+                title = "Year to date",
+                value = formatGBP(yearToDateTotal),
+                subtitle = "Since January",
+                icon = Icons.Default.TrendingUp
+            )
         }
 
-        Card(modifier = Modifier.fillMaxWidth()) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "Top supplier",
-                    color = MaterialTheme.colorScheme.primary
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.TrendingUp,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+
+                    Text(
+                        text = "  Top supplier",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
                 Text(
                     text = topSupplierName,
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(top = 6.dp)
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.padding(top = 8.dp)
                 )
+
                 Text(
-                    text = "£${"%.2f".format(topSupplierAmount)}",
+                    text = formatGBP(topSupplierAmount),
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(top = 4.dp)
                 )
             }
         }
 
-        Card(modifier = Modifier.fillMaxWidth()) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "Top category",
-                    color = MaterialTheme.colorScheme.primary
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PieChart,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+
+                    Text(
+                        text = "  Top category",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
                 Text(
                     text = topCategoryName,
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(top = 6.dp)
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.padding(top = 8.dp)
                 )
+
                 Text(
-                    text = "£${"%.2f".format(topCategoryAmount)}",
+                    text = formatGBP(topCategoryAmount),
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(top = 4.dp)
                 )
+            }
+        }
+
+        if (monthlyTrendData.isNotEmpty()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.TrendingUp,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+
+                        Text(
+                            text = "  Monthly spend",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    MonthlyTrendChart(
+                        data = monthlyTrendData,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(220.dp)
+                            .padding(top = 12.dp)
+                    )
+                }
+            }
+        }
+
+        if (donutCategoryData.isNotEmpty()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.PieChart,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+
+                        Text(
+                            text = "  Category breakdown",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    CategoryDonutChart(
+                        data = donutCategoryData,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(360.dp)
+                            .padding(top = 12.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MonthlyTrendChart(
+    data: List<Pair<String, Double>>,
+    modifier: Modifier = Modifier
+) {
+    if (data.isEmpty()) return
+
+    val values = data.map { it.second }
+    val maxValue = values.maxOrNull()?.takeIf { it > 0 } ?: 1.0
+
+    val labels = data.map { prettyMonthLabel(it.first).take(3) }
+
+    Column(modifier = modifier) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            val leftPadding = 48f
+            val rightPadding = 24f
+            val topPadding = 24f
+            val bottomPadding = 24f
+
+            val chartWidth = size.width - leftPadding - rightPadding
+            val chartHeight = size.height - topPadding - bottomPadding
+
+            val gridColor = androidx.compose.ui.graphics.Color(0xFFE5E7EB)
+            val axisTextColor = androidx.compose.ui.graphics.Color(0xFF6B7280)
+            val lineColor = androidx.compose.ui.graphics.Color(0xFF0077B6)
+
+            // horizontal grid lines
+            for (i in 0..3) {
+                val y = topPadding + (chartHeight / 3f) * i
+                drawLine(
+                    color = gridColor,
+                    start = Offset(leftPadding, y),
+                    end = Offset(size.width - rightPadding, y),
+                    strokeWidth = 1f
+                )
+            }
+
+            val points = data.mapIndexed { index, entry ->
+                val x = if (data.size == 1) {
+                    leftPadding + chartWidth / 2f
+                } else {
+                    leftPadding + (chartWidth / (data.size - 1)) * index
+                }
+
+                val yRatio = (entry.second / maxValue).toFloat()
+                val y = topPadding + chartHeight - (chartHeight * yRatio)
+
+                Offset(x, y)
+            }
+
+            if (points.isNotEmpty()) {
+                val linePath = Path().apply {
+                    moveTo(points.first().x, points.first().y)
+
+                    for (i in 1 until points.size) {
+                        val prev = points[i - 1]
+                        val current = points[i]
+                        val midX = (prev.x + current.x) / 2f
+
+                        quadraticBezierTo(
+                            prev.x,
+                            prev.y,
+                            midX,
+                            (prev.y + current.y) / 2f
+                        )
+                        quadraticBezierTo(
+                            current.x,
+                            current.y,
+                            current.x,
+                            current.y
+                        )
+                    }
+                }
+
+                val fillPath = Path().apply {
+                    addPath(linePath)
+                    lineTo(points.last().x, topPadding + chartHeight)
+                    lineTo(points.first().x, topPadding + chartHeight)
+                    close()
+                }
+
+                drawPath(
+                    path = fillPath,
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            lineColor.copy(alpha = 0.22f),
+                            lineColor.copy(alpha = 0.04f)
+                        ),
+                        startY = topPadding,
+                        endY = topPadding + chartHeight
+                    )
+                )
+
+                drawPath(
+                    path = linePath,
+                    color = lineColor,
+                    style = Stroke(width = 5f, cap = StrokeCap.Round)
+                )
+
+                points.forEach { point ->
+                    drawCircle(
+                        color = androidx.compose.ui.graphics.Color.White,
+                        radius = 9f,
+                        center = point
+                    )
+                    drawCircle(
+                        color = lineColor,
+                        radius = 7f,
+                        center = point
+                    )
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            labels.forEach { label ->
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun CategoryDonutChart(
+    data: List<Pair<String, Double>>,
+    modifier: Modifier = Modifier
+) {
+    if (data.isEmpty()) return
+
+    val total = data.sumOf { it.second }.takeIf { it > 0 } ?: 1.0
+
+    val colors = listOf(
+        Color(0xFF2563EB),
+        Color(0xFF3B82F6),
+        Color(0xFF60A5FA),
+        Color(0xFF93C5FD),
+        Color(0xFF38BDF8),
+        Color(0xFF94A3B8)
+    )
+
+    Column(modifier = modifier) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentAlignment = androidx.compose.ui.Alignment.Center
+        ) {
+            Canvas(
+                modifier = Modifier.fillMaxSize()
+            ) {
+                val diameter = min(size.width, size.height) * 0.88f
+                val strokeWidth = diameter * 0.30f
+                val topLeft = Offset(
+                    (size.width - diameter) / 2f,
+                    (size.height - diameter) / 2f
+                )
+                val arcSize = androidx.compose.ui.geometry.Size(diameter, diameter)
+
+                var startAngle = -90f
+
+                data.forEachIndexed { index, entry ->
+                    val sweep = ((entry.second / total) * 360f).toFloat()
+
+                    drawArc(
+                        color = colors[index % colors.size],
+                        startAngle = startAngle,
+                        sweepAngle = sweep,
+                        useCenter = false,
+                        topLeft = topLeft,
+                        size = arcSize,
+                        style = Stroke(width = strokeWidth, cap = StrokeCap.Butt)
+                    )
+
+                    startAngle += sweep
+                }
+
+                drawIntoCanvas { canvas ->
+                    val textPaint = android.graphics.Paint().apply {
+                        color = android.graphics.Color.parseColor("#1F2933")
+                        textAlign = android.graphics.Paint.Align.CENTER
+                        isFakeBoldText = true
+                        textSize = 42f
+                    }
+
+                    val subPaint = android.graphics.Paint().apply {
+                        color = android.graphics.Color.parseColor("#6B7280")
+                        textAlign = android.graphics.Paint.Align.CENTER
+                        textSize = 28f
+                    }
+
+                    canvas.nativeCanvas.drawText(
+                        "£${"%.0f".format(total)}",
+                        size.width / 2f,
+                        size.height / 2f,
+                        textPaint
+                    )
+
+                    canvas.nativeCanvas.drawText(
+                        "Total",
+                        size.width / 2f,
+                        size.height / 2f + 36f,
+                        subPaint
+                    )
+                }
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            data.forEachIndexed { index, entry ->
+                val pct = (entry.second / total) * 100.0
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Canvas(modifier = Modifier.size(12.dp)) {
+                            drawCircle(color = colors[index % colors.size])
+                        }
+
+                        Text(
+                            text = entry.first,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+
+                    Text(
+                        text = "${"%.0f".format(pct)}% • £${"%.2f".format(entry.second)}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
         }
     }
@@ -1424,7 +1847,8 @@ fun ExpenseCard(
     val expense = expenseUi.expense
 
     Card(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
@@ -1433,14 +1857,28 @@ fun ExpenseCard(
                 color = MaterialTheme.colorScheme.primary
             )
 
-            Text(
-                text = expense.category,
-                style = MaterialTheme.typography.bodyMedium
-            )
+            val categoryDotColor = MaterialTheme.colorScheme.primary
+
+            Row(
+                modifier = Modifier.padding(top = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Canvas(modifier = Modifier.size(8.dp)) {
+                    drawCircle(color = categoryDotColor)
+                }
+
+                Text(
+                    text = expense.category,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
 
             Text(
                 text = "${expense.date} • ${expense.supplier}",
-                style = MaterialTheme.typography.bodySmall
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
             )
 
             if (expense.notes.isNotBlank()) {
@@ -1603,6 +2041,10 @@ fun todayIsoDate(): String {
     val month = (calendar.get(Calendar.MONTH) + 1).toString().padStart(2, '0')
     val day = calendar.get(Calendar.DAY_OF_MONTH).toString().padStart(2, '0')
     return "$year-$month-$day"
+}
+
+fun formatGBP(amount: Double): String {
+    return "£${"%.2f".format(amount)}"
 }
 
 /*
