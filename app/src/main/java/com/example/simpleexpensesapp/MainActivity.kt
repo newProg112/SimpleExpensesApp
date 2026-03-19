@@ -7,10 +7,15 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -28,10 +34,12 @@ import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.PieChart
 import androidx.compose.material.icons.filled.TrendingUp
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -54,6 +62,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Path
@@ -61,6 +70,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -266,7 +276,14 @@ fun ExpensesScreen(
     var showDashboard by remember { mutableStateOf(false) }
     var editingExpense by remember { mutableStateOf<ExpenseUi?>(null) }
     var duplicatingExpense by remember { mutableStateOf<ExpenseUi?>(null) }
-    var listenerRegistered by remember { mutableStateOf(false) }
+    var showAddMileageForm by remember { mutableStateOf(false) }
+    var editingMileage by remember { mutableStateOf<MileageUi?>(null) }
+    var duplicatingMileage by remember { mutableStateOf<MileageUi?>(null) }
+
+    var mileageClaims by remember { mutableStateOf(listOf<MileageUi>()) }
+    var showMileageList by remember { mutableStateOf(false) }
+
+    var showAddMenu by remember { mutableStateOf(false) }
 
     val thisMonthKey = currentMonthKey()
 
@@ -285,6 +302,24 @@ fun ExpensesScreen(
     }
 
     val lastMonthTotal = lastMonthExpenses.sumOf { it.expense.net }
+
+    val thisMonthMileageClaims = mileageClaims.filter {
+        monthKeyFromDate(it.mileage.date) == thisMonthKey
+    }
+
+    val thisMonthMileageTotal = thisMonthMileageClaims.sumOf { it.mileage.total }
+    val thisMonthMileageMiles = thisMonthMileageClaims.sumOf { it.mileage.miles }
+
+    val yearToDateMileageClaims = mileageClaims.filter {
+        it.mileage.date.startsWith(currentYear)
+    }
+
+    val yearToDateMileageTotal = yearToDateMileageClaims.sumOf { it.mileage.total }
+
+    val topJourneyEntry = mileageClaims
+        .groupBy { it.mileage.journey.ifBlank { "Unknown journey" } }
+        .mapValues { entry -> entry.value.sumOf { it.mileage.total } }
+        .maxByOrNull { it.value }
 
     val yearToDateExpenses = expenses.filter {
         it.expense.date.startsWith(currentYear)
@@ -329,6 +364,14 @@ fun ExpensesScreen(
 
     val monthlyTrendData = monthlyTotals.entries.map { it.key to it.value }
 
+    val monthlyMileageMiles = mileageClaims
+        .groupBy { monthKeyFromDate(it.mileage.date) }
+        .filterKeys { it.isNotBlank() }
+        .mapValues { entry -> entry.value.sumOf { it.mileage.miles } }
+        .toSortedMap()
+
+    val monthlyMileageMilesData = monthlyMileageMiles.entries.map { it.key to it.value }
+
     val categoryTotals = expenses
         .groupBy { it.expense.category.ifBlank { "Uncategorised" } }
         .mapValues { entry -> entry.value.sumOf { it.expense.net } }
@@ -345,6 +388,8 @@ fun ExpensesScreen(
         }
     }
 
+    var selectedCategory by remember { mutableStateOf<String?>(null) }
+
     DisposableEffect(Unit) {
         val uid = auth.currentUser?.uid
         if (uid == null) {
@@ -355,7 +400,7 @@ fun ExpensesScreen(
             loading = true
             errorMsg = ""
 
-            val registration = db.collection("users")
+            val expensesRegistration = db.collection("users")
                 .document(uid)
                 .collection("expenses")
                 .orderBy("createdAt", Query.Direction.DESCENDING)
@@ -377,11 +422,32 @@ fun ExpensesScreen(
                     }
 
                     loading = false
-                    listenerRegistered = true
+                }
+
+            val mileageRegistration = db.collection("users")
+                .document(uid)
+                .collection("mileage")
+                .orderBy("createdAt", Query.Direction.DESCENDING)
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null) {
+                        errorMsg = error.message ?: "Failed to load mileage."
+                        return@addSnapshotListener
+                    }
+
+                    if (snapshot != null) {
+                        mileageClaims = snapshot.documents.map { doc ->
+                            val mileage = doc.toObject(MileageClaim::class.java) ?: MileageClaim()
+                            MileageUi(
+                                id = doc.id,
+                                mileage = mileage
+                            )
+                        }
+                    }
                 }
 
             onDispose {
-                registration.remove()
+                expensesRegistration.remove()
+                mileageRegistration.remove()
             }
         }
     }
@@ -389,9 +455,41 @@ fun ExpensesScreen(
     Scaffold(
         modifier = modifier.fillMaxSize(),
         floatingActionButton = {
-            if (!showAddForm) {
-                FloatingActionButton(onClick = { showAddForm = true }) {
-                    Text("Add")
+            if (
+                !showAddForm &&
+                !showAddMileageForm &&
+                editingExpense == null &&
+                editingMileage == null &&
+                duplicatingExpense == null &&
+                duplicatingMileage == null
+            ) {
+                Box {
+                    FloatingActionButton(
+                        onClick = { showAddMenu = true }
+                    ) {
+                        Text("Add")
+                    }
+
+                    DropdownMenu(
+                        expanded = showAddMenu,
+                        onDismissRequest = { showAddMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Add expense") },
+                            onClick = {
+                                showAddMenu = false
+                                showAddForm = true
+                            }
+                        )
+
+                        DropdownMenuItem(
+                            text = { Text("Add mileage") },
+                            onClick = {
+                                showAddMenu = false
+                                showAddMileageForm = true
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -407,6 +505,17 @@ fun ExpensesScreen(
                     showAddForm = false
                 }
             )
+        } else if (showAddMileageForm) {
+            AddMileageScreen(
+                modifier = Modifier.padding(innerPadding),
+                auth = auth,
+                db = db,
+                analytics = analytics,
+                onCancel = { showAddMileageForm = false },
+                onSaved = {
+                    showAddMileageForm = false
+                }
+            )
         } else if (editingExpense != null) {
             EditExpenseScreen(
                 modifier = Modifier.padding(innerPadding),
@@ -417,6 +526,18 @@ fun ExpensesScreen(
                 onCancel = { editingExpense = null },
                 onSaved = {
                     editingExpense = null
+                }
+            )
+        } else if (editingMileage != null) {
+            EditMileageScreen(
+                modifier = Modifier.padding(innerPadding),
+                auth = auth,
+                db = db,
+                analytics = analytics,
+                mileageUi = editingMileage!!,
+                onCancel = { editingMileage = null },
+                onSaved = {
+                    editingMileage = null
                 }
             )
         } else if (duplicatingExpense != null) {
@@ -431,12 +552,24 @@ fun ExpensesScreen(
                     duplicatingExpense = null
                 }
             )
+        } else if (duplicatingMileage != null) {
+            DuplicateMileageScreen(
+                modifier = Modifier.padding(innerPadding),
+                auth = auth,
+                db = db,
+                analytics = analytics,
+                mileageUi = duplicatingMileage!!,
+                onCancel = { duplicatingMileage = null },
+                onSaved = {
+                    duplicatingMileage = null
+                }
+            )
         } else {
             Column(
                 modifier = Modifier
                     .padding(innerPadding)
                     .fillMaxSize()
-                    .padding(16.dp)
+                    .padding(horizontal = 16.dp, vertical = 18.dp)
             ) {
                 Column(
                     modifier = Modifier.fillMaxWidth()
@@ -449,47 +582,122 @@ fun ExpensesScreen(
                     Text(
                         text = userEmail,
                         style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(top = 4.dp)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp)
                     )
 
-                    Row(
-                        modifier = Modifier.padding(top = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Column(
+                        modifier = Modifier.padding(top = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Button(onClick = { showDashboard = !showDashboard }) {
-                            Text(if (showDashboard) "Expenses" else "Dashboard")
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = MaterialTheme.shapes.large,
+                            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                ModeSwitchChip(
+                                    label = "Expenses",
+                                    selected = !showDashboard && !showMileageList,
+                                    onClick = {
+                                        showDashboard = false
+                                        showMileageList = false
+                                    }
+                                )
+
+                                ModeSwitchChip(
+                                    label = "Dashboard",
+                                    selected = showDashboard,
+                                    onClick = {
+                                        showDashboard = true
+                                        showMileageList = false
+                                    }
+                                )
+
+                                ModeSwitchChip(
+                                    label = "Mileage",
+                                    selected = showMileageList,
+                                    onClick = {
+                                        showMileageList = true
+                                        showDashboard = false
+                                    }
+                                )
+                            }
                         }
 
-                        Button(onClick = onSignOut) {
+                        TextButton(
+                            onClick = onSignOut,
+                            modifier = Modifier.padding(start = 2.dp)
+                        ) {
                             Text("Sign out")
                         }
                     }
                 }
 
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 16.dp)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "This month",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                // Comment out "This month / Current month snapshot" from Expenses list
+                /*
+                if (!showDashboard && !showMileageList) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 20.dp),
+                        shape = MaterialTheme.shapes.large,
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 20.dp)
+                        ) {
+                            Text(
+                                text = "This month",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary
+                            )
 
-                        Text(
-                            text = "£${"%.2f".format(thisMonthTotal)}",
-                            style = MaterialTheme.typography.headlineSmall,
-                            modifier = Modifier.padding(top = 6.dp)
-                        )
+                            Text(
+                                text = formatGBP(thisMonthTotal),
+                                style = MaterialTheme.typography.headlineMedium,
+                                modifier = Modifier.padding(top = 10.dp)
+                            )
 
-                        Text(
-                            text = "$thisMonthCount expense${if (thisMonthCount == 1) "" else "s"}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
+                            Text(
+                                text = "$thisMonthCount expense${if (thisMonthCount == 1) "" else "s"} recorded",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 6.dp)
+                            )
+
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 14.dp)
+                                    .clip(MaterialTheme.shapes.medium)
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = if (thisMonthCount == 0) "No entries yet" else "Current month snapshot",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
                     }
+                }
+                */
+
+                if (selectedCategory != null && !showDashboard) {
+                    Text(
+                        text = "Filtering: $selectedCategory (tap to clear)",
+                        modifier = Modifier
+                            .padding(top = 12.dp)
+                            .clickable { selectedCategory = null },
+                        color = MaterialTheme.colorScheme.primary
+                    )
                 }
 
                 when {
@@ -516,25 +724,75 @@ fun ExpensesScreen(
                             topCategoryName = topCategoryEntry?.key ?: "—",
                             topCategoryAmount = topCategoryEntry?.value ?: 0.0,
                             monthlyTrendData = monthlyTrendData,
-                            donutCategoryData = donutCategoryData
+                            donutCategoryData = donutCategoryData,
+                            selectedCategory = selectedCategory,
+                            thisMonthMileageTotal = thisMonthMileageTotal,
+                            thisMonthMileageMiles = thisMonthMileageMiles,
+                            yearToDateMileageTotal = yearToDateMileageTotal,
+                            monthlyMileageMilesData = monthlyMileageMilesData,
+                            topJourneyName = topJourneyEntry?.key ?: "—",
+                            topJourneyAmount = topJourneyEntry?.value ?: 0.0,
+                            onCategorySelected = { category ->
+                                selectedCategory = if (selectedCategory == category) null else category
+                                showDashboard = false
+                                showMileageList = false
+                            }
                         )
                     }
 
-                    expenses.isEmpty() -> {
-                        Text(
-                            text = "No expenses yet.",
-                            modifier = Modifier.padding(top = 24.dp)
+                    showMileageList && mileageClaims.isEmpty() -> {
+                        EmptyState(
+                            title = "No mileage yet",
+                            subtitle = "Tap Add to log your first journey"
                         )
                     }
 
-                    else -> {
+                    showMileageList -> {
                         LazyColumn(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(top = 16.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            items(expenses, key = { it.id }) { item ->
+                            items(mileageClaims, key = { it.id }) { item ->
+                                MileageCard(
+                                    mileageUi = item,
+                                    auth = auth,
+                                    db = db,
+                                    analytics = analytics,
+                                    onEdit = {
+                                        editingMileage = item
+                                    },
+                                    onDuplicate = {
+                                        duplicatingMileage = item
+                                    },
+                                    onDeleted = { }
+                                )
+                            }
+                        }
+                    }
+
+                    expenses.isEmpty() -> {
+                        EmptyState(
+                            title = "No expenses yet",
+                            subtitle = "Tap Add to create your first expense"
+                        )
+                    }
+
+                    else -> {
+                        val filteredExpenses = if (selectedCategory == null) {
+                            expenses
+                        } else {
+                            expenses.filter { it.expense.category == selectedCategory }
+                        }
+
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(top = 16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            items(filteredExpenses, key = { it.id }) { item ->
                                 ExpenseCard(
                                     expenseUi = item,
                                     auth = auth,
@@ -1333,6 +1591,805 @@ fun DuplicateExpenseScreen(
 }
 
 @Composable
+fun AddMileageScreen(
+    modifier: Modifier = Modifier,
+    auth: FirebaseAuth,
+    db: FirebaseFirestore,
+    analytics: FirebaseAnalytics,
+    onCancel: () -> Unit,
+    onSaved: () -> Unit
+) {
+    val context = LocalContext.current
+
+    var date by remember { mutableStateOf(todayIsoDate()) }
+    var journey by remember { mutableStateOf("") }
+    var fromLocation by remember { mutableStateOf("") }
+    var toLocation by remember { mutableStateOf("") }
+    var miles by remember { mutableStateOf("") }
+    var ratePerMile by remember { mutableStateOf("0.45") }
+    var notes by remember { mutableStateOf("") }
+
+    var saving by remember { mutableStateOf(false) }
+    var errorMsg by remember { mutableStateOf("") }
+
+    val milesValue = miles.toDoubleOrNull() ?: 0.0
+    val rateValue = ratePerMile.toDoubleOrNull() ?: 0.0
+    val totalValue = milesValue * rateValue
+
+    val calendar = Calendar.getInstance()
+    val datePickerDialog = DatePickerDialog(
+        context,
+        { _, year, month, dayOfMonth ->
+            val mm = (month + 1).toString().padStart(2, '0')
+            val dd = dayOfMonth.toString().padStart(2, '0')
+            date = "$year-$mm-$dd"
+        },
+        calendar.get(Calendar.YEAR),
+        calendar.get(Calendar.MONTH),
+        calendar.get(Calendar.DAY_OF_MONTH)
+    )
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState())
+    ) {
+        Text(
+            text = "Add mileage claim",
+            style = MaterialTheme.typography.headlineSmall
+        )
+
+        OutlinedTextField(
+            value = date,
+            onValueChange = {},
+            label = { Text("Date") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 16.dp),
+            readOnly = true
+        )
+
+        TextButton(onClick = { datePickerDialog.show() }) {
+            Text("Pick date")
+        }
+
+        OutlinedTextField(
+            value = journey,
+            onValueChange = {
+                journey = it
+                errorMsg = ""
+            },
+            label = { Text("Journey") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            singleLine = true
+        )
+
+        OutlinedTextField(
+            value = fromLocation,
+            onValueChange = {
+                fromLocation = it
+                errorMsg = ""
+            },
+            label = { Text("From") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            singleLine = true
+        )
+
+        OutlinedTextField(
+            value = toLocation,
+            onValueChange = {
+                toLocation = it
+                errorMsg = ""
+            },
+            label = { Text("To") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            singleLine = true
+        )
+
+        OutlinedTextField(
+            value = miles,
+            onValueChange = {
+                miles = it
+                errorMsg = ""
+            },
+            label = { Text("Miles") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+        )
+
+        OutlinedTextField(
+            value = ratePerMile,
+            onValueChange = {
+                ratePerMile = it
+                errorMsg = ""
+            },
+            label = { Text("Rate per mile (£)") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+        )
+
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 16.dp),
+            shape = MaterialTheme.shapes.large,
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Claim total",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Text(
+                    text = formatGBP(totalValue),
+                    style = MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+        }
+
+        OutlinedTextField(
+            value = notes,
+            onValueChange = {
+                notes = it
+                errorMsg = ""
+            },
+            label = { Text("Notes") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp)
+        )
+
+        if (errorMsg.isNotBlank()) {
+            Text(
+                text = errorMsg,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 12.dp)
+            )
+        }
+
+        Row(
+            modifier = Modifier.padding(top = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Button(
+                onClick = {
+                    val uid = auth.currentUser?.uid
+                    val parsedMiles = miles.toDoubleOrNull()
+                    val parsedRate = ratePerMile.toDoubleOrNull()
+
+                    if (uid == null) {
+                        errorMsg = "No signed-in user."
+                        return@Button
+                    }
+                    if (journey.isBlank()) {
+                        errorMsg = "Enter a journey."
+                        return@Button
+                    }
+                    if (fromLocation.isBlank()) {
+                        errorMsg = "Enter a start location."
+                        return@Button
+                    }
+                    if (toLocation.isBlank()) {
+                        errorMsg = "Enter an end location."
+                        return@Button
+                    }
+                    if (parsedMiles == null || parsedMiles <= 0.0) {
+                        errorMsg = "Enter valid miles."
+                        return@Button
+                    }
+                    if (parsedRate == null || parsedRate <= 0.0) {
+                        errorMsg = "Enter a valid rate per mile."
+                        return@Button
+                    }
+
+                    saving = true
+                    errorMsg = ""
+
+                    val total = parsedMiles * parsedRate
+
+                    val payload = hashMapOf<String, Any?>(
+                        "date" to date,
+                        "journey" to journey.trim(),
+                        "fromLocation" to fromLocation.trim(),
+                        "toLocation" to toLocation.trim(),
+                        "miles" to parsedMiles,
+                        "ratePerMile" to parsedRate,
+                        "total" to total,
+                        "notes" to notes.trim(),
+                        "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
+                    )
+
+                    db.collection("users")
+                        .document(uid)
+                        .collection("mileage")
+                        .add(payload)
+                        .addOnSuccessListener {
+                            val bundle = Bundle().apply {
+                                putDouble("miles", parsedMiles)
+                                putDouble("rate_per_mile", parsedRate)
+                                putDouble("claim_total", total)
+                            }
+
+                            analytics.logEvent("mileage_added", bundle)
+
+                            saving = false
+                            onSaved()
+                        }
+                        .addOnFailureListener { e ->
+                            saving = false
+                            errorMsg = e.message ?: "Failed to save mileage claim."
+                        }
+                },
+                enabled = !saving
+            ) {
+                if (saving) {
+                    CircularProgressIndicator()
+                } else {
+                    Text("Save")
+                }
+            }
+
+            TextButton(
+                onClick = onCancel,
+                enabled = !saving
+            ) {
+                Text("Cancel")
+            }
+        }
+    }
+}
+
+@Composable
+fun EditMileageScreen(
+    modifier: Modifier = Modifier,
+    auth: FirebaseAuth,
+    db: FirebaseFirestore,
+    analytics: FirebaseAnalytics,
+    mileageUi: MileageUi,
+    onCancel: () -> Unit,
+    onSaved: () -> Unit
+) {
+    val context = LocalContext.current
+    val original = mileageUi.mileage
+
+    var date by remember { mutableStateOf(original.date) }
+    var journey by remember { mutableStateOf(original.journey) }
+    var fromLocation by remember { mutableStateOf(original.fromLocation) }
+    var toLocation by remember { mutableStateOf(original.toLocation) }
+    var miles by remember { mutableStateOf(original.miles.toString()) }
+    var ratePerMile by remember { mutableStateOf(original.ratePerMile.toString()) }
+    var notes by remember { mutableStateOf(original.notes) }
+
+    var saving by remember { mutableStateOf(false) }
+    var errorMsg by remember { mutableStateOf("") }
+
+    val milesValue = miles.toDoubleOrNull() ?: 0.0
+    val rateValue = ratePerMile.toDoubleOrNull() ?: 0.0
+    val totalValue = milesValue * rateValue
+
+    val calendar = Calendar.getInstance()
+    val datePickerDialog = DatePickerDialog(
+        context,
+        { _, year, month, dayOfMonth ->
+            val mm = (month + 1).toString().padStart(2, '0')
+            val dd = dayOfMonth.toString().padStart(2, '0')
+            date = "$year-$mm-$dd"
+        },
+        calendar.get(Calendar.YEAR),
+        calendar.get(Calendar.MONTH),
+        calendar.get(Calendar.DAY_OF_MONTH)
+    )
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState())
+    ) {
+        Text(
+            text = "Edit mileage claim",
+            style = MaterialTheme.typography.headlineSmall
+        )
+
+        OutlinedTextField(
+            value = date,
+            onValueChange = {},
+            label = { Text("Date") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 16.dp),
+            readOnly = true
+        )
+
+        TextButton(onClick = { datePickerDialog.show() }) {
+            Text("Pick date")
+        }
+
+        OutlinedTextField(
+            value = journey,
+            onValueChange = {
+                journey = it
+                errorMsg = ""
+            },
+            label = { Text("Journey") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            singleLine = true
+        )
+
+        OutlinedTextField(
+            value = fromLocation,
+            onValueChange = {
+                fromLocation = it
+                errorMsg = ""
+            },
+            label = { Text("From") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            singleLine = true
+        )
+
+        OutlinedTextField(
+            value = toLocation,
+            onValueChange = {
+                toLocation = it
+                errorMsg = ""
+            },
+            label = { Text("To") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            singleLine = true
+        )
+
+        OutlinedTextField(
+            value = miles,
+            onValueChange = {
+                miles = it
+                errorMsg = ""
+            },
+            label = { Text("Miles") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+        )
+
+        OutlinedTextField(
+            value = ratePerMile,
+            onValueChange = {
+                ratePerMile = it
+                errorMsg = ""
+            },
+            label = { Text("Rate per mile (£)") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+        )
+
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 16.dp),
+            shape = MaterialTheme.shapes.large,
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Claim total",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Text(
+                    text = formatGBP(totalValue),
+                    style = MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+        }
+
+        OutlinedTextField(
+            value = notes,
+            onValueChange = {
+                notes = it
+                errorMsg = ""
+            },
+            label = { Text("Notes") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp)
+        )
+
+        if (errorMsg.isNotBlank()) {
+            Text(
+                text = errorMsg,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 12.dp)
+            )
+        }
+
+        Row(
+            modifier = Modifier.padding(top = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Button(
+                onClick = {
+                    val uid = auth.currentUser?.uid
+                    val parsedMiles = miles.toDoubleOrNull()
+                    val parsedRate = ratePerMile.toDoubleOrNull()
+
+                    if (uid == null) {
+                        errorMsg = "No signed-in user."
+                        return@Button
+                    }
+                    if (journey.isBlank()) {
+                        errorMsg = "Enter a journey."
+                        return@Button
+                    }
+                    if (fromLocation.isBlank()) {
+                        errorMsg = "Enter a start location."
+                        return@Button
+                    }
+                    if (toLocation.isBlank()) {
+                        errorMsg = "Enter an end location."
+                        return@Button
+                    }
+                    if (parsedMiles == null || parsedMiles <= 0.0) {
+                        errorMsg = "Enter valid miles."
+                        return@Button
+                    }
+                    if (parsedRate == null || parsedRate <= 0.0) {
+                        errorMsg = "Enter a valid rate per mile."
+                        return@Button
+                    }
+
+                    saving = true
+                    errorMsg = ""
+
+                    val total = parsedMiles * parsedRate
+
+                    val payload = hashMapOf<String, Any?>(
+                        "date" to date,
+                        "journey" to journey.trim(),
+                        "fromLocation" to fromLocation.trim(),
+                        "toLocation" to toLocation.trim(),
+                        "miles" to parsedMiles,
+                        "ratePerMile" to parsedRate,
+                        "total" to total,
+                        "notes" to notes.trim()
+                    )
+
+                    db.collection("users")
+                        .document(uid)
+                        .collection("mileage")
+                        .document(mileageUi.id)
+                        .update(payload)
+                        .addOnSuccessListener {
+                            val bundle = Bundle().apply {
+                                putDouble("miles", parsedMiles)
+                                putDouble("rate_per_mile", parsedRate)
+                                putDouble("claim_total", total)
+                            }
+
+                            analytics.logEvent("mileage_updated", bundle)
+
+                            saving = false
+                            onSaved()
+                        }
+                        .addOnFailureListener { e ->
+                            saving = false
+                            errorMsg = e.message ?: "Failed to update mileage claim."
+                        }
+                },
+                enabled = !saving
+            ) {
+                if (saving) {
+                    CircularProgressIndicator()
+                } else {
+                    Text("Update")
+                }
+            }
+
+            TextButton(
+                onClick = onCancel,
+                enabled = !saving
+            ) {
+                Text("Cancel")
+            }
+        }
+    }
+}
+
+@Composable
+fun DuplicateMileageScreen(
+    modifier: Modifier = Modifier,
+    auth: FirebaseAuth,
+    db: FirebaseFirestore,
+    analytics: FirebaseAnalytics,
+    mileageUi: MileageUi,
+    onCancel: () -> Unit,
+    onSaved: () -> Unit
+) {
+    val context = LocalContext.current
+    val original = mileageUi.mileage
+
+    var date by remember { mutableStateOf(original.date) }
+    var journey by remember { mutableStateOf(original.journey) }
+    var fromLocation by remember { mutableStateOf(original.fromLocation) }
+    var toLocation by remember { mutableStateOf(original.toLocation) }
+    var miles by remember { mutableStateOf(original.miles.toString()) }
+    var ratePerMile by remember { mutableStateOf(original.ratePerMile.toString()) }
+    var notes by remember { mutableStateOf(original.notes) }
+
+    var saving by remember { mutableStateOf(false) }
+    var errorMsg by remember { mutableStateOf("") }
+
+    val milesValue = miles.toDoubleOrNull() ?: 0.0
+    val rateValue = ratePerMile.toDoubleOrNull() ?: 0.0
+    val totalValue = milesValue * rateValue
+
+    val calendar = Calendar.getInstance()
+    val datePickerDialog = DatePickerDialog(
+        context,
+        { _, year, month, dayOfMonth ->
+            val mm = (month + 1).toString().padStart(2, '0')
+            val dd = dayOfMonth.toString().padStart(2, '0')
+            date = "$year-$mm-$dd"
+        },
+        calendar.get(Calendar.YEAR),
+        calendar.get(Calendar.MONTH),
+        calendar.get(Calendar.DAY_OF_MONTH)
+    )
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState())
+    ) {
+        Text(
+            text = "Duplicate mileage claim",
+            style = MaterialTheme.typography.headlineSmall
+        )
+
+        OutlinedTextField(
+            value = date,
+            onValueChange = {},
+            label = { Text("Date") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 16.dp),
+            readOnly = true
+        )
+
+        TextButton(onClick = { datePickerDialog.show() }) {
+            Text("Pick date")
+        }
+
+        OutlinedTextField(
+            value = journey,
+            onValueChange = {
+                journey = it
+                errorMsg = ""
+            },
+            label = { Text("Journey") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            singleLine = true
+        )
+
+        OutlinedTextField(
+            value = fromLocation,
+            onValueChange = {
+                fromLocation = it
+                errorMsg = ""
+            },
+            label = { Text("From") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            singleLine = true
+        )
+
+        OutlinedTextField(
+            value = toLocation,
+            onValueChange = {
+                toLocation = it
+                errorMsg = ""
+            },
+            label = { Text("To") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            singleLine = true
+        )
+
+        OutlinedTextField(
+            value = miles,
+            onValueChange = {
+                miles = it
+                errorMsg = ""
+            },
+            label = { Text("Miles") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+        )
+
+        OutlinedTextField(
+            value = ratePerMile,
+            onValueChange = {
+                ratePerMile = it
+                errorMsg = ""
+            },
+            label = { Text("Rate per mile (£)") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+        )
+
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 16.dp),
+            shape = MaterialTheme.shapes.large,
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Claim total",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Text(
+                    text = formatGBP(totalValue),
+                    style = MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+        }
+
+        OutlinedTextField(
+            value = notes,
+            onValueChange = {
+                notes = it
+                errorMsg = ""
+            },
+            label = { Text("Notes") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp)
+        )
+
+        if (errorMsg.isNotBlank()) {
+            Text(
+                text = errorMsg,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 12.dp)
+            )
+        }
+
+        Row(
+            modifier = Modifier.padding(top = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Button(
+                onClick = {
+                    val uid = auth.currentUser?.uid
+                    val parsedMiles = miles.toDoubleOrNull()
+                    val parsedRate = ratePerMile.toDoubleOrNull()
+
+                    if (uid == null) {
+                        errorMsg = "No signed-in user."
+                        return@Button
+                    }
+                    if (journey.isBlank()) {
+                        errorMsg = "Enter a journey."
+                        return@Button
+                    }
+                    if (fromLocation.isBlank()) {
+                        errorMsg = "Enter a start location."
+                        return@Button
+                    }
+                    if (toLocation.isBlank()) {
+                        errorMsg = "Enter an end location."
+                        return@Button
+                    }
+                    if (parsedMiles == null || parsedMiles <= 0.0) {
+                        errorMsg = "Enter valid miles."
+                        return@Button
+                    }
+                    if (parsedRate == null || parsedRate <= 0.0) {
+                        errorMsg = "Enter a valid rate per mile."
+                        return@Button
+                    }
+
+                    saving = true
+                    errorMsg = ""
+
+                    val total = parsedMiles * parsedRate
+
+                    val payload = hashMapOf<String, Any?>(
+                        "date" to date,
+                        "journey" to journey.trim(),
+                        "fromLocation" to fromLocation.trim(),
+                        "toLocation" to toLocation.trim(),
+                        "miles" to parsedMiles,
+                        "ratePerMile" to parsedRate,
+                        "total" to total,
+                        "notes" to notes.trim(),
+                        "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
+                    )
+
+                    db.collection("users")
+                        .document(uid)
+                        .collection("mileage")
+                        .add(payload)
+                        .addOnSuccessListener {
+                            val bundle = Bundle().apply {
+                                putDouble("miles", parsedMiles)
+                                putDouble("rate_per_mile", parsedRate)
+                                putDouble("claim_total", total)
+                            }
+
+                            analytics.logEvent("mileage_duplicated", bundle)
+
+                            saving = false
+                            onSaved()
+                        }
+                        .addOnFailureListener { e ->
+                            saving = false
+                            errorMsg = e.message ?: "Failed to duplicate mileage claim."
+                        }
+                },
+                enabled = !saving
+            ) {
+                if (saving) {
+                    CircularProgressIndicator()
+                } else {
+                    Text("Save duplicate")
+                }
+            }
+
+            TextButton(
+                onClick = onCancel,
+                enabled = !saving
+            ) {
+                Text("Cancel")
+            }
+        }
+    }
+}
+
+@Composable
 fun DashboardStatCard(
     modifier: Modifier = Modifier,
     title: String,
@@ -1342,18 +2399,30 @@ fun DashboardStatCard(
 ) {
     Card(
         modifier = modifier,
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        shape = MaterialTheme.shapes.large,
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(MaterialTheme.shapes.medium)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.10f))
+                        .padding(10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
 
                 Text(
-                    text = "  ${title.uppercase()}",
+                    text = title.uppercase(),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1362,14 +2431,133 @@ fun DashboardStatCard(
             Text(
                 text = value,
                 style = MaterialTheme.typography.headlineSmall,
-                modifier = Modifier.padding(top = 10.dp)
+                modifier = Modifier.padding(top = 14.dp)
             )
 
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp)
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun DashboardSectionHeader(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.titleMedium,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = 12.dp, bottom = 2.dp)
+    )
+}
+
+@Composable
+fun EmptyState(
+    title: String,
+    subtitle: String
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 56.dp, start = 24.dp, end = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium
+        )
+
+        Text(
+            text = subtitle,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+    }
+}
+
+@Composable
+fun ModeSwitchChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(
+                if (selected) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                } else {
+                    MaterialTheme.colorScheme.surface
+                }
+            )
+            .border(
+                width = 1.dp,
+                color = if (selected) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.32f)
+                } else {
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.20f)
+                },
+                shape = RoundedCornerShape(16.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 11.dp)
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (selected) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            }
+        )
+    }
+}
+
+@Composable
+fun DashboardPanel(
+    title: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier
+                    .clip(MaterialTheme.shapes.medium)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.06f))
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Column(
+                modifier = Modifier.padding(top = 14.dp),
+                content = content
             )
         }
     }
@@ -1386,15 +2574,25 @@ fun DashboardScreen(
     topCategoryName: String,
     topCategoryAmount: Double,
     monthlyTrendData: List<Pair<String, Double>>,
-    donutCategoryData: List<Pair<String, Double>>
+    donutCategoryData: List<Pair<String, Double>>,
+    selectedCategory: String?,
+    thisMonthMileageTotal: Double,
+    thisMonthMileageMiles: Double,
+    yearToDateMileageTotal: Double,
+    topJourneyName: String,
+    topJourneyAmount: Double,
+    monthlyMileageMilesData: List<Pair<String, Double>>,
+    onCategorySelected: (String) -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
             .padding(top = 16.dp, bottom = 80.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        DashboardSectionHeader("Expenses")
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -1437,135 +2635,128 @@ fun DashboardScreen(
             )
         }
 
-        Card(
+        DashboardSectionHeader("Mileage")
+
+        Row(
             modifier = Modifier.fillMaxWidth(),
-            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.TrendingUp,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
-                    )
+            DashboardStatCard(
+                modifier = Modifier.weight(1f),
+                title = "Mileage this month",
+                value = formatGBP(thisMonthMileageTotal),
+                subtitle = "${"%.1f".format(thisMonthMileageMiles)} miles claimed",
+                icon = Icons.Default.TrendingUp
+            )
 
-                    Text(
-                        text = "  Top supplier",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                Text(
-                    text = topSupplierName,
-                    style = MaterialTheme.typography.titleLarge,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
-
-                Text(
-                    text = formatGBP(topSupplierAmount),
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
+            DashboardStatCard(
+                modifier = Modifier.weight(1f),
+                title = "Mileage YTD",
+                value = formatGBP(yearToDateMileageTotal),
+                subtitle = "Claims since January",
+                icon = Icons.Default.Description
+            )
         }
 
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        DashboardSectionHeader("Insights")
+
+        DashboardPanel(
+            title = "Top supplier",
+            icon = Icons.Default.TrendingUp
         ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.PieChart,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
-                    )
+            Text(
+                text = topSupplierName,
+                style = MaterialTheme.typography.titleLarge
+            )
 
-                    Text(
-                        text = "  Top category",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+            Text(
+                text = formatGBP(topSupplierAmount),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
 
-                Text(
-                    text = topCategoryName,
-                    style = MaterialTheme.typography.titleLarge,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
+        DashboardPanel(
+            title = "Top category",
+            icon = Icons.Default.PieChart
+        ) {
+            Text(
+                text = topCategoryName,
+                style = MaterialTheme.typography.titleLarge
+            )
 
-                Text(
-                    text = formatGBP(topCategoryAmount),
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
+            Text(
+                text = formatGBP(topCategoryAmount),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+
+        DashboardPanel(
+            title = "Top journey",
+            icon = Icons.Default.TrendingUp
+        ) {
+            Text(
+                text = topJourneyName,
+                style = MaterialTheme.typography.titleLarge
+            )
+
+            Text(
+                text = formatGBP(topJourneyAmount),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+
+        if (monthlyTrendData.isNotEmpty() || monthlyMileageMilesData.isNotEmpty()) {
+            DashboardSectionHeader("Trends")
         }
 
         if (monthlyTrendData.isNotEmpty()) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            DashboardPanel(
+                title = "Monthly spend",
+                icon = Icons.Default.TrendingUp
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.TrendingUp,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
+                MonthlyTrendChart(
+                    data = monthlyTrendData,
+                    lineColor = Color(0xFF0077B6),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(220.dp)
+                )
+            }
+        }
 
-                        Text(
-                            text = "  Monthly spend",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    MonthlyTrendChart(
-                        data = monthlyTrendData,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(220.dp)
-                            .padding(top = 12.dp)
-                    )
-                }
+        if (monthlyMileageMilesData.isNotEmpty()) {
+            DashboardPanel(
+                title = "Monthly miles",
+                icon = Icons.Default.TrendingUp
+            ) {
+                MonthlyTrendChart(
+                    data = monthlyMileageMilesData,
+                    lineColor = Color(0xFF0F766E),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(220.dp)
+                )
             }
         }
 
         if (donutCategoryData.isNotEmpty()) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            DashboardSectionHeader("Breakdown")
+
+            DashboardPanel(
+                title = "Category breakdown",
+                icon = Icons.Default.PieChart
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.PieChart,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-
-                        Text(
-                            text = "  Category breakdown",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    CategoryDonutChart(
-                        data = donutCategoryData,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(360.dp)
-                            .padding(top = 12.dp)
-                    )
-                }
+                CategoryDonutChart(
+                    data = donutCategoryData,
+                    selectedCategory = selectedCategory,
+                    onCategorySelected = onCategorySelected,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(360.dp)
+                )
             }
         }
     }
@@ -1574,7 +2765,8 @@ fun DashboardScreen(
 @Composable
 fun MonthlyTrendChart(
     data: List<Pair<String, Double>>,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    lineColor: Color = Color(0xFF0077B6)
 ) {
     if (data.isEmpty()) return
 
@@ -1599,7 +2791,6 @@ fun MonthlyTrendChart(
 
             val gridColor = androidx.compose.ui.graphics.Color(0xFFE5E7EB)
             val axisTextColor = androidx.compose.ui.graphics.Color(0xFF6B7280)
-            val lineColor = androidx.compose.ui.graphics.Color(0xFF0077B6)
 
             // horizontal grid lines
             for (i in 0..3) {
@@ -1709,7 +2900,9 @@ fun MonthlyTrendChart(
 @Composable
 fun CategoryDonutChart(
     data: List<Pair<String, Double>>,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    selectedCategory: String?,
+    onCategorySelected: (String) -> Unit
 ) {
     if (data.isEmpty()) return
 
@@ -1800,10 +2993,20 @@ fun CategoryDonutChart(
             data.forEachIndexed { index, entry ->
                 val pct = (entry.second / total) * 100.0
 
+                val isSelected = entry.first == selectedCategory
+
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 6.dp),
+                        .clip(MaterialTheme.shapes.medium)
+                        .background(
+                            if (isSelected)
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+                            else
+                                Color.Transparent
+                        )
+                        .clickable { onCategorySelected(entry.first) }
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1817,17 +3020,35 @@ fun CategoryDonutChart(
 
                         Text(
                             text = entry.first,
-                            style = MaterialTheme.typography.bodyMedium
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                         )
                     }
 
                     Text(
                         text = "${"%.0f".format(pct)}% • £${"%.2f".format(entry.second)}",
-                        style = MaterialTheme.typography.bodySmall
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
         }
+    }
+}
+
+@Composable
+fun InfoPill(text: String) {
+    Box(
+        modifier = Modifier
+            .clip(MaterialTheme.shapes.medium)
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary
+        )
     }
 }
 
@@ -1843,39 +3064,38 @@ fun ExpenseCard(
 ) {
     var deleting by remember { mutableStateOf(false) }
     var errorMsg by remember { mutableStateOf("") }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
 
     val expense = expenseUi.expense
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+        shape = MaterialTheme.shapes.large,
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp)) {
             Text(
-                text = "£${"%.2f".format(expense.net)}",
-                style = MaterialTheme.typography.titleMedium,
+                text = formatGBP(expense.net),
+                style = MaterialTheme.typography.headlineSmall,
                 color = MaterialTheme.colorScheme.primary
             )
 
-            val categoryDotColor = MaterialTheme.colorScheme.primary
-
             Row(
-                modifier = Modifier.padding(top = 6.dp),
+                modifier = Modifier.padding(top = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Canvas(modifier = Modifier.size(8.dp)) {
-                    drawCircle(color = categoryDotColor)
-                }
-
-                Text(
-                    text = expense.category,
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                InfoPill(expense.category.ifBlank { "Uncategorised" })
             }
 
             Text(
-                text = "${expense.date} • ${expense.supplier}",
+                text = expense.supplier.ifBlank { "No supplier" },
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 12.dp)
+            )
+
+            Text(
+                text = expense.date,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp)
@@ -1884,8 +3104,9 @@ fun ExpenseCard(
             if (expense.notes.isNotBlank()) {
                 Text(
                     text = expense.notes,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(top = 6.dp)
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 10.dp)
                 )
             }
 
@@ -1893,13 +3114,14 @@ fun ExpenseCard(
                 Text(
                     text = errorMsg,
                     color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(top = 8.dp)
+                    modifier = Modifier.padding(top = 10.dp)
                 )
             }
 
             Row(
-                modifier = Modifier.padding(top = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                modifier = Modifier.padding(top = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Button(
                     onClick = onEdit,
@@ -1908,54 +3130,270 @@ fun ExpenseCard(
                     Text("Edit")
                 }
 
-                Button(
+                TextButton(
                     onClick = onDuplicate,
                     enabled = !deleting
                 ) {
                     Text("Duplicate")
                 }
 
-                Button(
+                TextButton(
                     onClick = {
-                        val uid = auth.currentUser?.uid
-                        if (uid == null) {
-                            errorMsg = "No signed-in user."
-                            return@Button
-                        }
-
-                        deleting = true
-                        errorMsg = ""
-
-                        db.collection("users")
-                            .document(uid)
-                            .collection("expenses")
-                            .document(expenseUi.id)
-                            .delete()
-                            .addOnSuccessListener {
-                                val bundle = Bundle().apply {
-                                    putString("category", expense.category.lowercase())
-                                    putString("vat_code", expense.vatCode)
-                                    putDouble("amount", expense.net)
-                                }
-
-                                analytics.logEvent("expense_deleted", bundle)
-
-                                deleting = false
-                                onDeleted()
-                            }
-                            .addOnFailureListener { e ->
-                                deleting = false
-                                errorMsg = e.message ?: "Failed to delete expense."
-                            }
+                        showDeleteConfirm = true
                     },
                     enabled = !deleting
                 ) {
                     if (deleting) {
-                        CircularProgressIndicator()
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
                     } else {
-                        Text("Delete")
+                        Text(
+                            text = "Delete",
+                            color = MaterialTheme.colorScheme.error
+                        )
                     }
                 }
+            }
+
+            if (showDeleteConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showDeleteConfirm = false },
+                    title = {
+                        Text("Delete expense?")
+                    },
+                    text = {
+                        Text("This will permanently remove this expense entry.")
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                val uid = auth.currentUser?.uid
+                                if (uid == null) {
+                                    errorMsg = "No signed-in user."
+                                    showDeleteConfirm = false
+                                    return@TextButton
+                                }
+
+                                deleting = true
+                                errorMsg = ""
+                                showDeleteConfirm = false
+
+                                db.collection("users")
+                                    .document(uid)
+                                    .collection("expenses")
+                                    .document(expenseUi.id)
+                                    .delete()
+                                    .addOnSuccessListener {
+                                        val bundle = Bundle().apply {
+                                            putString("category", expense.category.lowercase())
+                                            putString("vat_code", expense.vatCode)
+                                            putDouble("amount", expense.net)
+                                        }
+
+                                        analytics.logEvent("expense_deleted", bundle)
+
+                                        deleting = false
+                                        onDeleted()
+                                    }
+                                    .addOnFailureListener { e ->
+                                        deleting = false
+                                        errorMsg = e.message ?: "Failed to delete expense."
+                                    }
+                            }
+                        ) {
+                            Text(
+                                text = "Delete",
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = { showDeleteConfirm = false }
+                        ) {
+                            Text("Cancel")
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun MileageCard(
+    mileageUi: MileageUi,
+    auth: FirebaseAuth,
+    db: FirebaseFirestore,
+    analytics: FirebaseAnalytics,
+    onEdit: () -> Unit,
+    onDuplicate: () -> Unit,
+    onDeleted: () -> Unit
+) {
+    var deleting by remember { mutableStateOf(false) }
+    var errorMsg by remember { mutableStateOf("") }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    val mileage = mileageUi.mileage
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp)) {
+            Text(
+                text = formatGBP(mileage.total),
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            Row(
+                modifier = Modifier.padding(top = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                InfoPill("${"%.1f".format(mileage.miles)} miles")
+            }
+
+            Text(
+                text = mileage.journey.ifBlank { "Mileage claim" },
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 12.dp)
+            )
+
+            Text(
+                text = "${mileage.date} • ${mileage.fromLocation} → ${mileage.toLocation}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+
+            Text(
+                text = "Rate: £${"%.2f".format(mileage.ratePerMile)}/mile",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 10.dp)
+            )
+
+            if (mileage.notes.isNotBlank()) {
+                Text(
+                    text = mileage.notes,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 10.dp)
+                )
+            }
+
+            if (errorMsg.isNotBlank()) {
+                Text(
+                    text = errorMsg,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 10.dp)
+                )
+            }
+
+            Row(
+                modifier = Modifier.padding(top = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = onEdit,
+                    enabled = !deleting
+                ) {
+                    Text("Edit")
+                }
+
+                TextButton(
+                    onClick = onDuplicate,
+                    enabled = !deleting
+                ) {
+                    Text("Duplicate")
+                }
+
+                TextButton(
+                    onClick = {
+                        showDeleteConfirm = true
+                    },
+                    enabled = !deleting
+                ) {
+                    if (deleting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text(
+                            text = "Delete",
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+
+            if (showDeleteConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showDeleteConfirm = false },
+                    title = {
+                        Text("Delete mileage claim?")
+                    },
+                    text = {
+                        Text("This will permanently remove this mileage entry.")
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                val uid = auth.currentUser?.uid
+                                if (uid == null) {
+                                    errorMsg = "No signed-in user."
+                                    showDeleteConfirm = false
+                                    return@TextButton
+                                }
+
+                                deleting = true
+                                errorMsg = ""
+                                showDeleteConfirm = false
+
+                                db.collection("users")
+                                    .document(uid)
+                                    .collection("mileage")
+                                    .document(mileageUi.id)
+                                    .delete()
+                                    .addOnSuccessListener {
+                                        val bundle = Bundle().apply {
+                                            putDouble("miles", mileage.miles)
+                                            putDouble("rate_per_mile", mileage.ratePerMile)
+                                            putDouble("claim_total", mileage.total)
+                                        }
+
+                                        analytics.logEvent("mileage_deleted", bundle)
+
+                                        deleting = false
+                                        onDeleted()
+                                    }
+                                    .addOnFailureListener { e ->
+                                        deleting = false
+                                        errorMsg = e.message ?: "Failed to delete mileage claim."
+                                    }
+                            }
+                        ) {
+                            Text(
+                                text = "Delete",
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = { showDeleteConfirm = false }
+                        ) {
+                            Text("Cancel")
+                        }
+                    }
+                )
             }
         }
     }
