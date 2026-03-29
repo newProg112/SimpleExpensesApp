@@ -1,17 +1,23 @@
 package com.example.simpleexpensesapp
 
 import android.app.DatePickerDialog
+import android.content.Intent
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,6 +53,7 @@ import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -64,6 +71,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -71,6 +79,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -83,6 +92,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.toObject
+import com.google.firebase.storage.FirebaseStorage
 import java.util.Calendar
 import kotlin.math.min
 
@@ -833,6 +843,8 @@ fun AddExpenseScreen(
     var net by remember { mutableStateOf("") }
     var notes by remember { mutableStateOf("") }
     var vatCode by remember { mutableStateOf("standard") }
+    var attachmentUri by remember { mutableStateOf<Uri?>(null) }
+    var attachmentName by remember { mutableStateOf("") }
 
     var saving by remember { mutableStateOf(false) }
     var errorMsg by remember { mutableStateOf("") }
@@ -858,9 +870,26 @@ fun AddExpenseScreen(
         calendar.get(Calendar.DAY_OF_MONTH)
     )
 
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            attachmentUri = uri
+            attachmentName = uri.lastPathSegment ?: "Selected file"
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
         Text(
@@ -932,7 +961,7 @@ fun AddExpenseScreen(
                 net = it
                 errorMsg = ""
             },
-            label = { Text("Net (£)") },
+            label = { Text("Gross (£)") },
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = 12.dp),
@@ -984,6 +1013,80 @@ fun AddExpenseScreen(
                 .padding(top = 12.dp)
         )
 
+        Text(
+            text = "Attachment",
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.padding(top = 12.dp)
+        )
+
+        Row(
+            modifier = Modifier.padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            OutlinedButton(
+                onClick = {
+                    filePickerLauncher.launch(arrayOf("image/*", "application/pdf"))
+                }
+            ) {
+                Text("Attach image or PDF")
+            }
+        }
+
+        if (attachmentName.isNotBlank()) {
+            Text(
+                text = "Selected: $attachmentName",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+
+            val mimeType = attachmentUri?.let { context.contentResolver.getType(it) }.orEmpty()
+
+            if (mimeType.startsWith("image/")) {
+                val previewBitmap = remember(attachmentUri) {
+                    attachmentUri?.let { uri ->
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            BitmapFactory.decodeStream(input)
+                        }
+                    }
+                }
+
+                previewBitmap?.let { bitmap ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 10.dp),
+                        shape = MaterialTheme.shapes.large,
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "Attachment preview",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(180.dp)
+                        )
+                    }
+                }
+            } else if (mimeType == "application/pdf") {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp),
+                    shape = MaterialTheme.shapes.large,
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                ) {
+                    Text(
+                        text = "PDF selected",
+                        modifier = Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+
         if (errorMsg.isNotBlank()) {
             Text(
                 text = errorMsg,
@@ -1014,44 +1117,81 @@ fun AddExpenseScreen(
                         return@Button
                     }
                     if (netValue == null || netValue <= 0.0) {
-                        errorMsg = "Enter a valid net amount."
+                        errorMsg = "Enter a valid gross amount."
                         return@Button
                     }
 
                     saving = true
                     errorMsg = ""
 
-                    val payload = hashMapOf<String, Any?>(
-                        "date" to date,
-                        "supplier" to supplier.trim(),
-                        "category" to category.trim(),
-                        "net" to netValue,
-                        "vatCode" to vatCode,
-                        "notes" to notes.trim(),
-                        "receipt" to null,
-                        "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
-                    )
-
-                    db.collection("users")
+                    val storage = FirebaseStorage.getInstance()
+                    val expenseRef = db.collection("users")
                         .document(uid)
                         .collection("expenses")
-                        .add(payload)
-                        .addOnSuccessListener {
-                            val bundle = Bundle().apply {
-                                putDouble("amount", netValue)
-                                putString("category", category.trim().lowercase())
-                                putString("vat_code", vatCode)
+
+                    fun saveExpense(receiptData: Map<String, Any?>?) {
+                        val payload = hashMapOf<String, Any?>(
+                            "date" to date,
+                            "supplier" to supplier.trim(),
+                            "category" to category.trim(),
+                            "net" to netValue,
+                            "vatCode" to vatCode,
+                            "notes" to notes.trim(),
+                            "receipt" to receiptData,
+                            "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
+                        )
+
+                        expenseRef
+                            .add(payload)
+                            .addOnSuccessListener {
+                                val bundle = Bundle().apply {
+                                    putDouble("amount", netValue)
+                                    putString("category", category.trim().lowercase())
+                                    putString("vat_code", vatCode)
+                                }
+
+                                analytics.logEvent("expense_added", bundle)
+
+                                saving = false
+                                onSaved()
                             }
+                            .addOnFailureListener { e ->
+                                saving = false
+                                errorMsg = e.message ?: "Failed to save expense."
+                            }
+                    }
 
-                            analytics.logEvent("expense_added", bundle)
+                    if (attachmentUri != null) {
+                        val safeName = (attachmentName.ifBlank { "attachment" }).replace(" ", "_")
+                        val path = "users/$uid/receipts/${System.currentTimeMillis()}_$safeName"
+                        val fileRef = storage.reference.child(path)
 
-                            saving = false
-                            onSaved()
-                        }
-                        .addOnFailureListener { e ->
-                            saving = false
-                            errorMsg = e.message ?: "Failed to save expense."
-                        }
+                        fileRef.putFile(attachmentUri!!)
+                            .continueWithTask { task ->
+                                if (!task.isSuccessful) {
+                                    throw task.exception ?: Exception("Upload failed.")
+                                }
+                                fileRef.downloadUrl
+                            }
+                            .addOnSuccessListener { downloadUri ->
+                                val mimeType = context.contentResolver.getType(attachmentUri!!) ?: "unknown"
+
+                                val receiptData = hashMapOf<String, Any?>(
+                                    "url" to downloadUri.toString(),
+                                    "path" to path,
+                                    "name" to safeName,
+                                    "type" to mimeType
+                                )
+
+                                saveExpense(receiptData)
+                            }
+                            .addOnFailureListener { e ->
+                                saving = false
+                                errorMsg = e.message ?: "Failed to upload attachment."
+                            }
+                    } else {
+                        saveExpense(null)
+                    }
                 },
                 enabled = !saving
             ) {
@@ -3067,6 +3207,7 @@ fun ExpenseCard(
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
     val expense = expenseUi.expense
+    val context = LocalContext.current
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -3100,6 +3241,19 @@ fun ExpenseCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp)
             )
+
+            if (!expense.receipt?.url.isNullOrBlank()) {
+                Text(
+                    text = "📎 Receipt",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .padding(top = 8.dp)
+                        .clickable {
+                            openUrl(context, expense.receipt?.url.orEmpty())
+                        }
+                )
+            }
 
             if (expense.notes.isNotBlank()) {
                 Text(
@@ -3237,6 +3391,7 @@ fun MileageCard(
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
     val mileage = mileageUi.mileage
+    val context = LocalContext.current
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -3270,6 +3425,19 @@ fun MileageCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp)
             )
+
+            if (!mileage.attachment?.url.isNullOrBlank()) {
+                Text(
+                    text = "📎 Evidence",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .padding(top = 8.dp)
+                        .clickable {
+                            openUrl(context, mileage.attachment?.url.orEmpty())
+                        }
+                )
+            }
 
             Text(
                 text = "Rate: £${"%.2f".format(mileage.ratePerMile)}/mile",
@@ -3483,6 +3651,11 @@ fun todayIsoDate(): String {
 
 fun formatGBP(amount: Double): String {
     return "£${"%.2f".format(amount)}"
+}
+
+fun openUrl(context: android.content.Context, url: String) {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+    context.startActivity(intent)
 }
 
 /*

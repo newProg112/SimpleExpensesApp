@@ -11,6 +11,7 @@ data class MileageClaim(
     val ratePerMile: Double = 0.45,
     val total: Double = 0.0,
     val notes: String = "",
+    val attachment: FileAttachment? = null,
     val createdAt: Timestamp? = null
 )
 

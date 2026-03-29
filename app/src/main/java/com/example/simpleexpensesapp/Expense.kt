@@ -8,7 +8,7 @@ data class Expense(
     val date: String = "",
     val net: Double = 0.0,
     val notes: String = "",
-    val receipt: String? = null,
+    val receipt: FileAttachment? = null,
     val supplier: String = "",
     val vatCode: String = ""
 )
