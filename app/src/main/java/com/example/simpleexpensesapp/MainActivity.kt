@@ -1,7 +1,9 @@
 package com.example.simpleexpensesapp
 
 import android.app.DatePickerDialog
+import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
@@ -81,10 +83,12 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.example.simpleexpensesapp.ui.theme.SimpleExpensesAppTheme
 import com.google.firebase.analytics.FirebaseAnalytics
@@ -93,6 +97,9 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.toObject
 import com.google.firebase.storage.FirebaseStorage
+import com.google.firebase.storage.storageMetadata
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.util.Calendar
 import kotlin.math.min
 
@@ -159,18 +166,24 @@ fun LoginScreen(
         modifier = modifier
             .fillMaxSize()
             .padding(24.dp),
-        verticalArrangement = Arrangement.Center
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(
-            text = "Simple Expenses",
-            style = MaterialTheme.typography.headlineMedium,
-            color = MaterialTheme.colorScheme.primary
+        Image(
+            painter = painterResource(id = R.drawable.simple_expenses_logo),
+            contentDescription = "Simple Expenses logo",
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(120.dp),
+            contentScale = ContentScale.Fit
         )
+
+        Spacer(modifier = Modifier.height(20.dp))
 
         Text(
             text = "Track expenses across web and mobile",
             style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(top = 8.dp, bottom = 24.dp)
+            modifier = Modifier.padding(bottom = 24.dp)
         )
 
         OutlinedTextField(
@@ -582,18 +595,23 @@ fun ExpensesScreen(
                     .padding(horizontal = 16.dp, vertical = 18.dp)
             ) {
                 Column(
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text(
-                        text = "Simple Expenses",
-                        style = MaterialTheme.typography.headlineSmall
+                    Image(
+                        painter = painterResource(id = R.drawable.simple_expenses_logo),
+                        contentDescription = "Simple Expenses logo",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(90.dp),
+                        contentScale = ContentScale.Fit
                     )
 
                     Text(
                         text = userEmail,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 8.dp)
+                        modifier = Modifier.padding(top = 10.dp)
                     )
 
                     Column(
@@ -850,6 +868,8 @@ fun AddExpenseScreen(
     var errorMsg by remember { mutableStateOf("") }
     var vatExpanded by remember { mutableStateOf(false) }
 
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+
     val vatOptions = listOf(
         "standard" to "VAT 20% (Standard)",
         "reduced" to "VAT 5% (Reduced)",
@@ -883,6 +903,19 @@ fun AddExpenseScreen(
                 )
             } catch (_: Exception) {
             }
+        }
+    }
+
+    val takePhotoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        if (success && pendingCameraUri != null) {
+            attachmentUri = pendingCameraUri
+            attachmentName = "photo_${System.currentTimeMillis()}.jpg"
+            errorMsg = ""
+            pendingCameraUri = null
+        } else {
+            pendingCameraUri = null
         }
     }
 
@@ -1025,6 +1058,18 @@ fun AddExpenseScreen(
         ) {
             OutlinedButton(
                 onClick = {
+                    val tempUri = createTempImageUri(context)
+                    pendingCameraUri = tempUri
+                    attachmentUri = tempUri
+                    attachmentName = "photo_${System.currentTimeMillis()}.jpg"
+                    takePhotoLauncher.launch(tempUri)
+                }
+            ) {
+                Text("Take photo")
+            }
+
+            OutlinedButton(
+                onClick = {
                     filePickerLauncher.launch(arrayOf("image/*", "application/pdf"))
                 }
             ) {
@@ -1084,6 +1129,18 @@ fun AddExpenseScreen(
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
+            }
+
+            TextButton(
+                onClick = {
+                    attachmentUri = null
+                    attachmentName = ""
+                    pendingCameraUri = null
+                    errorMsg = ""
+                },
+                modifier = Modifier.padding(top = 8.dp)
+            ) {
+                Text("Remove attachment")
             }
         }
 
@@ -1162,33 +1219,87 @@ fun AddExpenseScreen(
                     }
 
                     if (attachmentUri != null) {
-                        val safeName = (attachmentName.ifBlank { "attachment" }).replace(" ", "_")
-                        val path = "users/$uid/receipts/${System.currentTimeMillis()}_$safeName"
+                        val selectedUri = attachmentUri!!
+                        val detectedMimeType = context.contentResolver.getType(selectedUri) ?: "unknown"
+                        val isImage = detectedMimeType.startsWith("image/")
+
+                        val safeName = (
+                                attachmentName.ifBlank {
+                                    if (isImage) "attachment.jpg" else "attachment"
+                                }
+                                ).replace(" ", "_")
+
+                        val finalFileName = if (isImage && !safeName.lowercase().endsWith(".jpg") && !safeName.lowercase().endsWith(".jpeg")) {
+                            safeName.substringBeforeLast(".") + ".jpg"
+                        } else {
+                            safeName
+                        }
+
+                        val path = "users/$uid/receipts/${System.currentTimeMillis()}_$finalFileName"
                         val fileRef = storage.reference.child(path)
 
-                        fileRef.putFile(attachmentUri!!)
-                            .continueWithTask { task ->
-                                if (!task.isSuccessful) {
-                                    throw task.exception ?: Exception("Upload failed.")
-                                }
-                                fileRef.downloadUrl
-                            }
-                            .addOnSuccessListener { downloadUri ->
-                                val mimeType = context.contentResolver.getType(attachmentUri!!) ?: "unknown"
+                        if (isImage) {
+                            val compressedBytes = compressImageFromUri(
+                                context = context,
+                                uri = selectedUri,
+                                maxWidth = 1600,
+                                jpegQuality = 80
+                            )
 
-                                val receiptData = hashMapOf<String, Any?>(
-                                    "url" to downloadUri.toString(),
-                                    "path" to path,
-                                    "name" to safeName,
-                                    "type" to mimeType
-                                )
-
-                                saveExpense(receiptData)
-                            }
-                            .addOnFailureListener { e ->
+                            if (compressedBytes == null) {
                                 saving = false
-                                errorMsg = e.message ?: "Failed to upload attachment."
+                                errorMsg = "Failed to process image."
+                                return@Button
                             }
+
+                            val metadata = storageMetadata {
+                                contentType = "image/jpeg"
+                            }
+
+                            fileRef.putBytes(compressedBytes, metadata)
+                                .continueWithTask { task ->
+                                    if (!task.isSuccessful) {
+                                        throw task.exception ?: Exception("Upload failed.")
+                                    }
+                                    fileRef.downloadUrl
+                                }
+                                .addOnSuccessListener { downloadUri ->
+                                    val receiptData = hashMapOf<String, Any?>(
+                                        "url" to downloadUri.toString(),
+                                        "path" to path,
+                                        "name" to finalFileName,
+                                        "type" to "image/jpeg"
+                                    )
+
+                                    saveExpense(receiptData)
+                                }
+                                .addOnFailureListener { e ->
+                                    saving = false
+                                    errorMsg = e.message ?: "Failed to upload image."
+                                }
+                        } else {
+                            fileRef.putFile(selectedUri)
+                                .continueWithTask { task ->
+                                    if (!task.isSuccessful) {
+                                        throw task.exception ?: Exception("Upload failed.")
+                                    }
+                                    fileRef.downloadUrl
+                                }
+                                .addOnSuccessListener { downloadUri ->
+                                    val receiptData = hashMapOf<String, Any?>(
+                                        "url" to downloadUri.toString(),
+                                        "path" to path,
+                                        "name" to safeName,
+                                        "type" to detectedMimeType
+                                    )
+
+                                    saveExpense(receiptData)
+                                }
+                                .addOnFailureListener { e ->
+                                    saving = false
+                                    errorMsg = e.message ?: "Failed to upload attachment."
+                                }
+                        }
                     } else {
                         saveExpense(null)
                     }
@@ -1752,6 +1863,10 @@ fun AddMileageScreen(
     var saving by remember { mutableStateOf(false) }
     var errorMsg by remember { mutableStateOf("") }
 
+    var attachmentUri by remember { mutableStateOf<Uri?>(null) }
+    var attachmentName by remember { mutableStateOf("") }
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+
     val milesValue = miles.toDoubleOrNull() ?: 0.0
     val rateValue = ratePerMile.toDoubleOrNull() ?: 0.0
     val totalValue = milesValue * rateValue
@@ -1768,6 +1883,35 @@ fun AddMileageScreen(
         calendar.get(Calendar.MONTH),
         calendar.get(Calendar.DAY_OF_MONTH)
     )
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            attachmentUri = uri
+            attachmentName = uri.lastPathSegment ?: "Selected file"
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    val takePhotoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        if (success && pendingCameraUri != null) {
+            attachmentUri = pendingCameraUri
+            attachmentName = "photo_${System.currentTimeMillis()}.jpg"
+            pendingCameraUri = null
+            errorMsg = ""
+        } else {
+            pendingCameraUri = null
+        }
+    }
 
     Column(
         modifier = modifier
@@ -1895,6 +2039,106 @@ fun AddMileageScreen(
                 .padding(top = 12.dp)
         )
 
+        Text(
+            text = "Attachment",
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.padding(top = 12.dp)
+        )
+
+        Row(
+            modifier = Modifier.padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            OutlinedButton(
+                onClick = {
+                    val tempUri = createTempImageUri(context)
+                    pendingCameraUri = tempUri
+                    attachmentUri = tempUri
+                    attachmentName = "photo_${System.currentTimeMillis()}.jpg"
+                    takePhotoLauncher.launch(tempUri)
+                }
+            ) {
+                Text("Take photo")
+            }
+
+            OutlinedButton(
+                onClick = {
+                    filePickerLauncher.launch(arrayOf("image/*", "application/pdf"))
+                }
+            ) {
+                Text("Attach image or PDF")
+            }
+        }
+
+        if (attachmentName.isNotBlank()) {
+            Text(
+                text = "Selected: $attachmentName",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+
+            val mimeType = attachmentUri?.let { uri ->
+                resolveMimeType(context, uri, attachmentName)
+            }.orEmpty()
+
+            if (mimeType.startsWith("image/")) {
+                val previewBitmap = remember(attachmentUri) {
+                    attachmentUri?.let { uri ->
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            BitmapFactory.decodeStream(input)
+                        }
+                    }
+                }
+
+                previewBitmap?.let { bitmap ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 10.dp),
+                        shape = MaterialTheme.shapes.large,
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "Attachment preview",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(180.dp)
+                        )
+                    }
+                }
+            } else if (mimeType == "application/pdf") {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp),
+                    shape = MaterialTheme.shapes.large,
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                ) {
+                    Text(
+                        text = "PDF selected",
+                        modifier = Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            TextButton(
+                onClick = {
+                    attachmentUri = null
+                    attachmentName = ""
+                    pendingCameraUri = null
+                    errorMsg = ""
+                },
+                modifier = Modifier.padding(top = 8.dp)
+            ) {
+                Text("Remove attachment")
+            }
+        }
+
         if (errorMsg.isNotBlank()) {
             Text(
                 text = errorMsg,
@@ -1942,39 +2186,134 @@ fun AddMileageScreen(
                     errorMsg = ""
 
                     val total = parsedMiles * parsedRate
-
-                    val payload = hashMapOf<String, Any?>(
-                        "date" to date,
-                        "journey" to journey.trim(),
-                        "fromLocation" to fromLocation.trim(),
-                        "toLocation" to toLocation.trim(),
-                        "miles" to parsedMiles,
-                        "ratePerMile" to parsedRate,
-                        "total" to total,
-                        "notes" to notes.trim(),
-                        "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
-                    )
-
-                    db.collection("users")
+                    val storage = FirebaseStorage.getInstance()
+                    val mileageRef = db.collection("users")
                         .document(uid)
                         .collection("mileage")
-                        .add(payload)
-                        .addOnSuccessListener {
-                            val bundle = Bundle().apply {
-                                putDouble("miles", parsedMiles)
-                                putDouble("rate_per_mile", parsedRate)
-                                putDouble("claim_total", total)
+
+                    fun saveMileage(receiptData: Map<String, Any?>?) {
+                        val payload = hashMapOf<String, Any?>(
+                            "date" to date,
+                            "journey" to journey.trim(),
+                            "fromLocation" to fromLocation.trim(),
+                            "toLocation" to toLocation.trim(),
+                            "miles" to parsedMiles,
+                            "ratePerMile" to parsedRate,
+                            "total" to total,
+                            "notes" to notes.trim(),
+                            "attachment" to receiptData,
+                            "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
+                        )
+
+                        mileageRef
+                            .add(payload)
+                            .addOnSuccessListener {
+                                val bundle = Bundle().apply {
+                                    putDouble("miles", parsedMiles)
+                                    putDouble("rate_per_mile", parsedRate)
+                                    putDouble("claim_total", total)
+                                }
+
+                                analytics.logEvent("mileage_added", bundle)
+
+                                saving = false
+                                onSaved()
+                            }
+                            .addOnFailureListener { e ->
+                                saving = false
+                                errorMsg = e.message ?: "Failed to save mileage claim."
+                            }
+                    }
+
+                    if (attachmentUri != null) {
+                        val selectedUri = attachmentUri!!
+                        val detectedMimeType = resolveMimeType(context, selectedUri, attachmentName)
+                        val isImage = isImageMimeType(detectedMimeType)
+
+                        val safeName = (
+                                attachmentName.ifBlank {
+                                    if (isImage) "attachment.jpg" else "attachment"
+                                }
+                                ).replace(" ", "_")
+
+                        val finalFileName = if (
+                            isImage &&
+                            !safeName.lowercase().endsWith(".jpg") &&
+                            !safeName.lowercase().endsWith(".jpeg")
+                        ) {
+                            safeName.substringBeforeLast(".") + ".jpg"
+                        } else {
+                            safeName
+                        }
+
+                        val path = "users/$uid/mileage_receipts/${System.currentTimeMillis()}_$finalFileName"
+                        val fileRef = storage.reference.child(path)
+
+                        if (isImage) {
+                            val compressedBytes = compressImageFromUri(
+                                context = context,
+                                uri = selectedUri,
+                                maxWidth = 1600,
+                                jpegQuality = 80
+                            )
+
+                            if (compressedBytes == null) {
+                                saving = false
+                                errorMsg = "Failed to process image."
+                                return@Button
                             }
 
-                            analytics.logEvent("mileage_added", bundle)
+                            val metadata = storageMetadata {
+                                contentType = "image/jpeg"
+                            }
 
-                            saving = false
-                            onSaved()
+                            fileRef.putBytes(compressedBytes, metadata)
+                                .continueWithTask { task ->
+                                    if (!task.isSuccessful) {
+                                        throw task.exception ?: Exception("Upload failed.")
+                                    }
+                                    fileRef.downloadUrl
+                                }
+                                .addOnSuccessListener { downloadUri ->
+                                    val receiptData = hashMapOf<String, Any?>(
+                                        "url" to downloadUri.toString(),
+                                        "path" to path,
+                                        "name" to finalFileName,
+                                        "type" to "image/jpeg"
+                                    )
+
+                                    saveMileage(receiptData)
+                                }
+                                .addOnFailureListener { e ->
+                                    saving = false
+                                    errorMsg = e.message ?: "Failed to upload image."
+                                }
+                        } else {
+                            fileRef.putFile(selectedUri)
+                                .continueWithTask { task ->
+                                    if (!task.isSuccessful) {
+                                        throw task.exception ?: Exception("Upload failed.")
+                                    }
+                                    fileRef.downloadUrl
+                                }
+                                .addOnSuccessListener { downloadUri ->
+                                    val receiptData = hashMapOf<String, Any?>(
+                                        "url" to downloadUri.toString(),
+                                        "path" to path,
+                                        "name" to safeName,
+                                        "type" to detectedMimeType
+                                    )
+
+                                    saveMileage(receiptData)
+                                }
+                                .addOnFailureListener { e ->
+                                    saving = false
+                                    errorMsg = e.message ?: "Failed to upload attachment."
+                                }
                         }
-                        .addOnFailureListener { e ->
-                            saving = false
-                            errorMsg = e.message ?: "Failed to save mileage claim."
-                        }
+                    } else {
+                        saveMileage(null)
+                    }
                 },
                 enabled = !saving
             ) {
@@ -3656,6 +3995,84 @@ fun formatGBP(amount: Double): String {
 fun openUrl(context: android.content.Context, url: String) {
     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
     context.startActivity(intent)
+}
+
+private fun createTempImageUri(context: Context): Uri {
+    val imageFile = File.createTempFile(
+        "expense_photo_${System.currentTimeMillis()}",
+        ".jpg",
+        context.cacheDir
+    )
+
+    return FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        imageFile
+    )
+}
+
+private fun compressImageFromUri(
+    context: Context,
+    uri: Uri,
+    maxWidth: Int = 1600,
+    jpegQuality: Int = 80
+): ByteArray? {
+    val originalBitmap = context.contentResolver.openInputStream(uri)?.use { input ->
+        BitmapFactory.decodeStream(input)
+    } ?: return null
+
+    val resizedBitmap = resizeBitmapIfNeeded(originalBitmap, maxWidth)
+
+    return ByteArrayOutputStream().use { output ->
+        resizedBitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, output)
+        output.toByteArray()
+    }
+}
+
+private fun resizeBitmapIfNeeded(bitmap: Bitmap, maxWidth: Int): Bitmap {
+    if (bitmap.width <= maxWidth) return bitmap
+
+    val ratio = maxWidth.toFloat() / bitmap.width.toFloat()
+    val targetHeight = (bitmap.height * ratio).toInt()
+
+    return Bitmap.createScaledBitmap(
+        bitmap,
+        maxWidth,
+        targetHeight,
+        true
+    )
+}
+
+private fun resolveMimeType(
+    context: Context,
+    uri: Uri,
+    attachmentName: String
+): String {
+    val resolverType = context.contentResolver.getType(uri)
+    if (!resolverType.isNullOrBlank()) return resolverType
+
+    val name = attachmentName.lowercase()
+    val uriString = uri.toString().lowercase()
+
+    return when {
+        name.endsWith(".jpg") || name.endsWith(".jpeg") ||
+                uriString.endsWith(".jpg") || uriString.endsWith(".jpeg") -> "image/jpeg"
+
+        name.endsWith(".png") ||
+                uriString.endsWith(".png") -> "image/png"
+
+        name.endsWith(".heic") || name.endsWith(".heif") ||
+                uriString.endsWith(".heic") || uriString.endsWith(".heif") -> "image/heic"
+
+        name.endsWith(".pdf") ||
+                uriString.endsWith(".pdf") -> "application/pdf"
+
+        else -> "application/octet-stream"
+    }
+}
+
+private fun isImageMimeType(mimeType: String): Boolean {
+    return mimeType.startsWith("image/")
 }
 
 /*
