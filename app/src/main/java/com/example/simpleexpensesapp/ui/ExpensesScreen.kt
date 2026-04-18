@@ -71,16 +71,14 @@ fun ExpensesScreen(
     db: FirebaseFirestore,
     analytics: FirebaseAnalytics,
     userEmail: String,
-    navController: NavController
+    navController: NavController,
+    onEditExpense: (ExpenseUi) -> Unit,
+    onEditMileage: (MileageUi) -> Unit
 ) {
     var expenses by remember { mutableStateOf(listOf<ExpenseUi>()) }
     var loading by remember { mutableStateOf(true) }
     var errorMsg by remember { mutableStateOf("") }
-    var showAddForm by remember { mutableStateOf(false) }
-    var editingExpense by remember { mutableStateOf<ExpenseUi?>(null) }
     var duplicatingExpense by remember { mutableStateOf<ExpenseUi?>(null) }
-    var showAddMileageForm by remember { mutableStateOf(false) }
-    var editingMileage by remember { mutableStateOf<MileageUi?>(null) }
     var duplicatingMileage by remember { mutableStateOf<MileageUi?>(null) }
 
     var mileageClaims by remember { mutableStateOf(listOf<MileageUi>()) }
@@ -259,10 +257,6 @@ fun ExpensesScreen(
         modifier = modifier.fillMaxSize(),
         floatingActionButton = {
             if (
-                !showAddForm &&
-                !showAddMileageForm &&
-                editingExpense == null &&
-                editingMileage == null &&
                 duplicatingExpense == null &&
                 duplicatingMileage == null
             ) {
@@ -281,7 +275,9 @@ fun ExpensesScreen(
                             text = { Text("Add expense") },
                             onClick = {
                                 showAddMenu = false
-                                showAddForm = true
+                                navController.navigate(Screen.AddExpense.route) {
+                                    launchSingleTop = true
+                                }
                             }
                         )
 
@@ -289,7 +285,9 @@ fun ExpensesScreen(
                             text = { Text("Add mileage") },
                             onClick = {
                                 showAddMenu = false
-                                showAddMileageForm = true
+                                navController.navigate(Screen.AddMileage.route) {
+                                    launchSingleTop = true
+                                }
                             }
                         )
                     }
@@ -297,53 +295,7 @@ fun ExpensesScreen(
             }
         }
     ) { innerPadding ->
-        if (showAddForm) {
-            AddExpenseScreen(
-                modifier = Modifier.padding(innerPadding),
-                auth = auth,
-                db = db,
-                analytics = analytics,
-                onCancel = { showAddForm = false },
-                onSaved = {
-                    showAddForm = false
-                }
-            )
-        } else if (showAddMileageForm) {
-            AddMileageScreen(
-                modifier = Modifier.padding(innerPadding),
-                auth = auth,
-                db = db,
-                analytics = analytics,
-                onCancel = { showAddMileageForm = false },
-                onSaved = {
-                    showAddMileageForm = false
-                }
-            )
-        } else if (editingExpense != null) {
-            EditExpenseScreen(
-                modifier = Modifier.padding(innerPadding),
-                auth = auth,
-                db = db,
-                analytics = analytics,
-                expenseUi = editingExpense!!,
-                onCancel = { editingExpense = null },
-                onSaved = {
-                    editingExpense = null
-                }
-            )
-        } else if (editingMileage != null) {
-            EditMileageScreen(
-                modifier = Modifier.padding(innerPadding),
-                auth = auth,
-                db = db,
-                analytics = analytics,
-                mileageUi = editingMileage!!,
-                onCancel = { editingMileage = null },
-                onSaved = {
-                    editingMileage = null
-                }
-            )
-        } else if (duplicatingExpense != null) {
+        if (duplicatingExpense != null) {
             DuplicateExpenseScreen(
                 modifier = Modifier.padding(innerPadding),
                 auth = auth,
@@ -392,6 +344,12 @@ fun ExpensesScreen(
                         style = MaterialTheme.typography.titleLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 10.dp)
+                    )
+
+                    Text(
+                        text = "Track your expenses and mileage",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
                     Column(
@@ -523,7 +481,7 @@ fun ExpensesScreen(
                                     db = db,
                                     analytics = analytics,
                                     onEdit = {
-                                        editingMileage = item
+                                        onEditMileage(item)
                                     },
                                     onDuplicate = {
                                         duplicatingMileage = item
@@ -562,7 +520,7 @@ fun ExpensesScreen(
                                     analytics = analytics,
                                     onDeleted = { },
                                     onEdit = {
-                                        editingExpense = item
+                                        onEditExpense(item)
                                     },
                                     onDuplicate = {
                                         duplicatingExpense = item

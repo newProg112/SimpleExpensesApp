@@ -38,6 +38,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.PieChart
@@ -54,6 +56,7 @@ import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -94,6 +97,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.example.simpleexpensesapp.ui.AddMileageScreen
+import com.example.simpleexpensesapp.ui.EditMileageScreen
 import com.example.simpleexpensesapp.ui.ExpensesScreen
 import com.example.simpleexpensesapp.ui.SettingsScreen
 import com.example.simpleexpensesapp.ui.theme.SimpleExpensesAppTheme
@@ -127,6 +131,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val navController = rememberNavController()
+            var selectedExpenseForEdit by remember { mutableStateOf<ExpenseUi?>(null) }
+            var selectedMileageForEdit by remember { mutableStateOf<MileageUi?>(null) }
 
             SimpleExpensesAppTheme {
                 var signedInUserEmail by remember { mutableStateOf(auth.currentUser?.email) }
@@ -153,7 +159,19 @@ class MainActivity : ComponentActivity() {
                                     db = db,
                                     analytics = analytics,
                                     userEmail = signedInUserEmail ?: "",
-                                    navController = navController
+                                    navController = navController,
+                                    onEditExpense = { expense ->
+                                        selectedExpenseForEdit = expense
+                                        navController.navigate(Screen.EditExpense.route) {
+                                            launchSingleTop = true
+                                        }
+                                    },
+                                    onEditMileage = { mileage ->
+                                        selectedMileageForEdit = mileage
+                                        navController.navigate(Screen.EditMileage.route) {
+                                            launchSingleTop = true
+                                        }
+                                    }
                                 )
                             }
 
@@ -164,7 +182,19 @@ class MainActivity : ComponentActivity() {
                                     db = db,
                                     analytics = analytics,
                                     userEmail = signedInUserEmail ?: "",
-                                    navController = navController
+                                    navController = navController,
+                                    onEditExpense = { expense ->
+                                        selectedExpenseForEdit = expense
+                                        navController.navigate(Screen.EditExpense.route) {
+                                            launchSingleTop = true
+                                        }
+                                    },
+                                    onEditMileage = { mileage ->
+                                        selectedMileageForEdit = mileage
+                                        navController.navigate(Screen.EditMileage.route) {
+                                            launchSingleTop = true
+                                        }
+                                    }
                                 )
                             }
 
@@ -175,7 +205,19 @@ class MainActivity : ComponentActivity() {
                                     db = db,
                                     analytics = analytics,
                                     userEmail = signedInUserEmail ?: "",
-                                    navController = navController
+                                    navController = navController,
+                                    onEditExpense = { expense ->
+                                        selectedExpenseForEdit = expense
+                                        navController.navigate(Screen.EditExpense.route) {
+                                            launchSingleTop = true
+                                        }
+                                    },
+                                    onEditMileage = { mileage ->
+                                        selectedMileageForEdit = mileage
+                                        navController.navigate(Screen.EditMileage.route) {
+                                            launchSingleTop = true
+                                        }
+                                    }
                                 )
                             }
 
@@ -187,6 +229,76 @@ class MainActivity : ComponentActivity() {
                                         signedInUserEmail = null
                                     }
                                 )
+                            }
+
+                            composable(Screen.AddExpense.route) {
+                                AddExpenseScreen(
+                                    modifier = Modifier.fillMaxSize(),
+                                    auth = auth,
+                                    db = db,
+                                    analytics = analytics,
+                                    onCancel = {
+                                        navController.popBackStack()
+                                    },
+                                    onSaved = {
+                                        navController.popBackStack()
+                                    }
+                                )
+                            }
+
+                            composable(Screen.EditExpense.route) {
+                                val expense = selectedExpenseForEdit
+
+                                if (expense != null) {
+                                    EditExpenseScreen(
+                                        modifier = Modifier.fillMaxSize(),
+                                        auth = auth,
+                                        db = db,
+                                        analytics = analytics,
+                                        expenseUi = expense,
+                                        onCancel = {
+                                            navController.popBackStack()
+                                        },
+                                        onSaved = {
+                                            navController.popBackStack()
+                                        }
+                                    )
+                                }
+                            }
+
+                            composable(Screen.AddMileage.route) {
+                                AddMileageScreen(
+                                    modifier = Modifier.fillMaxSize(),
+                                    auth = auth,
+                                    db = db,
+                                    analytics = analytics,
+                                    onCancel = {
+                                        navController.popBackStack()
+                                    },
+                                    onSaved = {
+                                        navController.popBackStack()
+                                    }
+                                )
+                            }
+
+                            composable(Screen.EditMileage.route) {
+                                val mileage = selectedMileageForEdit
+
+                                if (mileage != null) {
+                                    EditMileageScreen(
+                                        modifier = Modifier.fillMaxSize(),
+                                        auth = auth,
+                                        db = db,
+                                        analytics = analytics,
+                                        mileageUi = mileage,
+                                        onCancel = {
+                                            navController.popBackStack()
+                                        },
+                                        onSaved = {
+                                            navController.popBackStack()
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
@@ -410,10 +522,22 @@ fun AddExpenseScreen(
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
-        Text(
-            text = "Add expense",
-            style = MaterialTheme.typography.headlineSmall
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            IconButton(onClick = onCancel) {
+                Icon(
+                    imageVector = Icons.Default.ArrowBack,
+                    contentDescription = "Back"
+                )
+            }
+
+            Text(
+                text = "Add expense",
+                style = MaterialTheme.typography.headlineSmall
+            )
+        }
 
         OutlinedTextField(
             value = date,
